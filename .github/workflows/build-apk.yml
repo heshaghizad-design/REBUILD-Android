@@ -70,6 +70,8 @@ jobs:
           android.useAndroidX=true
           kotlin.code.style=official
           android.nonTransitiveRClass=true
+          android.builtInKotlin=false
+          android.newDsl=false
           EOF
 
           cat > app/build.gradle.kts <<'EOF'
