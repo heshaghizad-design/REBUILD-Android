@@ -1,0 +1,356 @@
+name: Build REBUILD V1.2 REAL VIDEO APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Rebuild Android project structure
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p app/src/main/java/com/rebuild/hamed
+          mkdir -p app/src/main/res/drawable-nodpi
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/raw
+
+          cp MainActivity.kt app/src/main/java/com/rebuild/hamed/MainActivity.kt
+          cp AndroidManifest.xml app/src/main/AndroidManifest.xml
+          cp strings.xml app/src/main/res/values/strings.xml
+          cp styles.xml app/src/main/res/values/styles.xml
+
+          cp chest_press_start.png app/src/main/res/drawable-nodpi/chest_press_start.png
+          cp chest_press_press.png app/src/main/res/drawable-nodpi/chest_press_press.png
+          cp muscles_chest.png app/src/main/res/drawable-nodpi/muscles_chest.png
+          cp mistake_head.png app/src/main/res/drawable-nodpi/mistake_head.png
+          cp mistake_shrug.png app/src/main/res/drawable-nodpi/mistake_shrug.png
+          cp mistake_elbow.png app/src/main/res/drawable-nodpi/mistake_elbow.png
+
+          echo "Downloading real chest press video..."
+
+          PRIMARY_VIDEO="https://assets.mixkit.co/active_storage/video_items/100538/1725384701/100538-video-720.mp4"
+          FALLBACK_VIDEO="https://assets.mixkit.co/videos/preview/mixkit-man-using-chest-press-machine-at-gym-100534-large.mp4"
+
+          if ! curl -fL --retry 3 --retry-delay 2 \
+              -A "Mozilla/5.0" \
+              "$PRIMARY_VIDEO" \
+              -o app/src/main/res/raw/chest_press_real.mp4; then
+
+            echo "Primary video failed. Trying fallback..."
+
+            curl -fL --retry 3 --retry-delay 2 \
+              -A "Mozilla/5.0" \
+              "$FALLBACK_VIDEO" \
+              -o app/src/main/res/raw/chest_press_real.mp4
+          fi
+
+          VIDEO_SIZE=$(stat -c%s app/src/main/res/raw/chest_press_real.mp4)
+          echo "Downloaded video size: $VIDEO_SIZE bytes"
+
+          if [ "$VIDEO_SIZE" -lt 500000 ]; then
+            echo "Downloaded file is too small to be a valid exercise video."
+            exit 1
+          fi
+
+          file app/src/main/res/raw/chest_press_real.mp4 || true
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("app/src/main/java/com/rebuild/hamed/MainActivity.kt")
+          s = p.read_text(encoding="utf-8")
+
+          s = s.replace("import androidx.compose.animation.Crossfade\n", "")
+          s = s.replace("import androidx.compose.animation.core.tween\n", "")
+
+          if "import android.net.Uri\n" not in s:
+              s = s.replace(
+                  "import android.os.Bundle\n",
+                  "import android.os.Bundle\nimport android.os.Build\nimport android.net.Uri\nimport android.widget.VideoView\n",
+                  1,
+              )
+
+          if "import androidx.compose.ui.viewinterop.AndroidView\n" not in s:
+              s = s.replace(
+                  "import androidx.compose.ui.unit.sp\n",
+                  "import androidx.compose.ui.unit.sp\nimport androidx.compose.ui.viewinterop.AndroidView\n",
+                  1,
+              )
+
+          s = re.sub(
+              r"\n\s*var frame by rememberSaveable\s*\{\s*mutableIntStateOf\(0\)\s*\}\s*",
+              "\n",
+              s,
+              count=1,
+          )
+
+          start = s.find("    LaunchedEffect(\n        isPlaying,")
+          if start < 0:
+              start = s.find("    LaunchedEffect(isPlaying,")
+
+          if start >= 0:
+              nxt = s.find("    LaunchedEffect(", start + 10)
+              if nxt > start:
+                  s = s[:start] + s[nxt:]
+
+          cross = s.find("Crossfade(")
+          if cross < 0:
+              raise SystemExit("Crossfade block was not found in MainActivity.kt")
+
+          if_start = s.rfind("if (correctMode)", 0, cross)
+          if if_start < 0:
+              raise SystemExit("correctMode block was not found")
+
+          m = re.search(r"\n\s*\}\s*else\s*\{\s*\n", s[cross:], re.S)
+          if not m:
+              raise SystemExit("correctMode else block was not found")
+
+          block_end = cross + m.end()
+          indent = s[s.rfind("\n", 0, if_start) + 1:if_start]
+
+          replacement = (
+              "if (correctMode) {\n"
+              f"{indent}    LocalExerciseVideo(\n"
+              f"{indent}        isPlaying = isPlaying,\n"
+              f"{indent}        speed = speed,\n"
+              f"{indent}        modifier = Modifier.fillMaxSize()\n"
+              f"{indent}    )\n"
+              f"{indent}}} else {{\n"
+          )
+
+          s = s[:if_start] + replacement + s[block_end:]
+
+          s = s.replace("اشتباه خطرناک", "اشتباه رایج")
+
+          s = s.replace(
+              'Text("7 حرکت · حدود 55–65 دقیقه"',
+              'Text("7 حرکت · حدود \\u200E55–65\\u200E دقیقه"',
+          )
+
+          s = s.replace(
+              '"${session.exercises.size} حرکت · 55–65 دقیقه"',
+              '"${session.exercises.size} حرکت · \\u200E55–65\\u200E دقیقه"',
+          )
+
+          s = s.replace(
+              "Chip(\n                                ex.reps\n                            )",
+              "Chip(\n                                \"\\u200E${ex.reps}\\u200E\"\n                            )",
+          )
+
+          s = s.replace(
+              "Metric(\n                        exercise.reps,",
+              "Metric(\n                        \"\\u200E${exercise.reps}\\u200E\",",
+          )
+
+          s = s.replace(
+              'MiniInfo(\n                    "55–65",',
+              'MiniInfo(\n                    "\\u200E55–65\\u200E",',
+          )
+
+          video_fun = r'''
+          @Composable
+          private fun LocalExerciseVideo(
+              isPlaying: Boolean,
+              speed: Float,
+              modifier: Modifier = Modifier
+          ) {
+              key(speed) {
+                  AndroidView(
+                      factory = { context ->
+                          VideoView(context).apply {
+                              setVideoURI(
+                                  Uri.parse(
+                                      "android.resource://${context.packageName}/${R.raw.chest_press_real}"
+                                  )
+                              )
+          
+                              setOnPreparedListener { player ->
+                                  player.isLooping = true
+          
+                                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                      player.playbackParams =
+                                          player.playbackParams.setSpeed(speed)
+                                  }
+          
+                                  if (isPlaying) {
+                                      start()
+                                  }
+                              }
+          
+                              setOnErrorListener { _, what, extra ->
+                                  android.util.Log.e(
+                                      "REBUILD_VIDEO",
+                                      "VideoView error what=$what extra=$extra"
+                                  )
+                                  true
+                              }
+          
+                              setBackgroundColor(
+                                  android.graphics.Color.rgb(242, 246, 250)
+                              )
+                          }
+                      },
+                      update = { video ->
+                          if (isPlaying) {
+                              if (!video.isPlaying) {
+                                  video.start()
+                              }
+                          } else {
+                              if (video.isPlaying) {
+                                  video.pause()
+                              }
+                          }
+                      },
+                      modifier = modifier
+                  )
+              }
+          }
+          
+          '''
+
+          if "private fun LocalExerciseVideo(" not in s:
+              marker = "@Composable\nprivate fun PremiumCard"
+
+              if marker not in s:
+                  raise SystemExit("PremiumCard marker was not found")
+
+              s = s.replace(
+                  marker,
+                  video_fun + marker,
+                  1,
+              )
+
+          p.write_text(s, encoding="utf-8")
+          PY
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "REBUILD"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "9.0.0" apply false
+              id("org.jetbrains.kotlin.android") version "2.2.20" apply false
+              id("org.jetbrains.kotlin.plugin.compose") version "2.2.20" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          android.builtInKotlin=false
+          android.newDsl=false
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("org.jetbrains.kotlin.plugin.compose")
+          }
+
+          android {
+              namespace = "com.rebuild.hamed"
+              compileSdk = 36
+
+              defaultConfig {
+                  applicationId = "com.rebuild.hamed"
+                  minSdk = 26
+                  targetSdk = 36
+                  versionCode = 3
+                  versionName = "1.2.0"
+              }
+
+              buildFeatures {
+                  compose = true
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              val composeBom =
+                  platform("androidx.compose:compose-bom:2025.09.01")
+
+              implementation(composeBom)
+
+              implementation("androidx.core:core-ktx:1.17.0")
+              implementation("androidx.activity:activity-compose:1.11.0")
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.ui:ui-tooling-preview")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.material:material-icons-extended")
+              implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.3")
+
+              debugImplementation("androidx.compose.ui:ui-tooling")
+          }
+          EOF
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Configure Android SDK
+        shell: bash
+        run: |
+          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+
+          yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager \
+            --licenses >/dev/null || true
+
+          /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "platform-tools"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.1.0'
+
+      - name: Build V1.2 APK
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Upload V1.2 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: REBUILD-v1.2-real-video-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
