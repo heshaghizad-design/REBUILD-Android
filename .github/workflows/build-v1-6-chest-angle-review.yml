@@ -1,0 +1,156 @@
+name: REBUILD V1.6 Chest Press Side-Angle Review
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-v1-6-chest-angle-review.yml'
+
+jobs:
+  review-side-angle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Prepare preview tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v ffmpeg
+          command -v ffprobe
+          mkdir -p angle-review/previews angle-review/frames
+
+      - name: Download candidates and render angle contact sheets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/review.py <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import urllib.request
+          from pathlib import Path
+
+          root = Path('angle-review')
+          previews = root / 'previews'
+          frames = root / 'frames'
+          previews.mkdir(parents=True, exist_ok=True)
+          frames.mkdir(parents=True, exist_ok=True)
+
+          candidates = [
+              ('pexels_37496984', 'https://www.pexels.com/download/video/37496984/',
+               'https://www.pexels.com/video/man-performing-chest-exercises-in-gym-37496984/'),
+              ('pexels_30557645', 'https://www.pexels.com/download/video/30557645/',
+               'https://www.pexels.com/video/man-exercising-on-chest-machine-in-home-gym-30557645/'),
+              ('pexels_34131259', 'https://www.pexels.com/download/video/34131259/',
+               'https://www.pexels.com/video/man-exercising-in-home-gym-with-equipment-34131259/'),
+              ('pexels_34543872', 'https://www.pexels.com/download/video/34543872/',
+               'https://www.pexels.com/video/dynamic-gym-workout-with-chest-press-machine-34543872/'),
+              ('mixkit_100534', 'https://mixkit.co/free-stock-video/man-using-chest-press-machine-at-gym-100534/',
+               'https://mixkit.co/free-stock-video/man-using-chest-press-machine-at-gym-100534/'),
+              ('mixkit_100537', 'https://mixkit.co/free-stock-video/man-working-out-on-a-chest-press-machine-in-a-100537/',
+               'https://mixkit.co/free-stock-video/man-working-out-on-a-chest-press-machine-in-a-100537/'),
+              ('mixkit_100539', 'https://mixkit.co/free-stock-video/man-working-out-on-chest-press-machine-in-gym-100539/',
+               'https://mixkit.co/free-stock-video/man-working-out-on-chest-press-machine-in-gym-100539/'),
+          ]
+
+          def run(*argv, check=True):
+              return subprocess.run(argv, capture_output=True, text=True, check=check)
+
+          def download(url, path):
+              res = run('curl', '-fLsS', '--connect-timeout', '18', '--max-time', '110',
+                        '--retry', '1', '-A', 'Mozilla/5.0', url, '-o', str(path), check=False)
+              return res.returncode == 0 and path.exists() and path.stat().st_size > 150000
+
+          def mixkit_video_url(page_url, id):
+              html = root / ('mixkit_' + id + '.html')
+              if not download(page_url, html):
+                  # Small HTML pages can be under 150 KB; retrieve directly regardless of size.
+                  run('curl', '-fLsS', '--max-time', '40', '-A', 'Mozilla/5.0',
+                      page_url, '-o', str(html), check=False)
+              content = html.read_text(errors='ignore') if html.exists() else ''
+              content = content.replace('\\/', '/').replace('\\u002F', '/')
+              matches = re.findall(r'https?://[^\s"<>\\]+?\.mp4(?:\?[^\s"<>\\]*)?', content)
+              matches = [x for x in matches if id in x and 'mixkit' in x]
+              matches.sort(key=lambda x: ('-video-720' not in x, len(x)))
+              if matches:
+                  return matches[0]
+              slugs = {
+                  '100534': 'man-using-chest-press-machine-at-gym',
+                  '100537': 'man-working-out-on-a-chest-press-machine-in-a',
+                  '100539': 'man-working-out-on-chest-press-machine-in-gym',
+              }
+              return f'https://assets.mixkit.co/videos/preview/mixkit-{slugs[id]}-{id}-large.mp4'
+
+          results = []
+          for name, url, page in candidates:
+              entry = {'id':name, 'source_page':page, 'state':'failed'}
+              original = root / (name + '_source.mp4')
+              try:
+                  if name.startswith('mixkit_'):
+                      download_url = mixkit_video_url(url, name.split('_')[1])
+                  else:
+                      download_url = url
+                  entry['video_url'] = download_url
+                  if not download(download_url, original):
+                      raise RuntimeError('Download failed or was smaller than 150 KB')
+
+                  probe = run('ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                              '-show_entries', 'format=duration:stream=width,height,codec_name',
+                              '-of', 'json', str(original))
+                  info = json.loads(probe.stdout)
+                  duration = float(info.get('format', {}).get('duration', 0))
+                  if duration < 3:
+                      raise RuntimeError('Not a valid video or duration too short')
+                  entry['duration_seconds'] = round(duration, 2)
+                  entry['video_streams'] = info.get('streams', [])
+                  snapshots = []
+                  for idx, frac in enumerate((0.15, 0.5, 0.85), 1):
+                      shot = frames / f'{name}_{idx}.jpg'
+                      run('ffmpeg', '-y', '-v', 'error', '-ss', str(duration * frac),
+                          '-i', str(original), '-frames:v', '1',
+                          '-vf', 'scale=480:270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2',
+                          str(shot))
+                      snapshots.append(shot)
+                  sheet = root / f'{name}_angle_contact_sheet.jpg'
+                  run('ffmpeg', '-y', '-v', 'error',
+                      '-i', str(snapshots[0]), '-i', str(snapshots[1]), '-i', str(snapshots[2]),
+                      '-filter_complex', 'hstack=inputs=3', '-frames:v', '1', str(sheet))
+                  clip = previews / (name + '_preview.mp4')
+                  run('ffmpeg', '-y', '-v', 'error', '-i', str(original), '-t', '16',
+                      '-vf', 'scale=640:-2', '-r', '24', '-c:v', 'libx264',
+                      '-preset', 'veryfast', '-crf', '29', '-pix_fmt', 'yuv420p', '-an',
+                      '-movflags', '+faststart', str(clip))
+                  entry['state'] = 'downloaded_and_frames_extracted'
+                  entry['angle_not_verified'] = True
+              except Exception as exc:
+                  entry['error'] = str(exc)
+              finally:
+                  original.unlink(missing_ok=True)
+                  results.append(entry)
+                  print(name, entry['state'], entry.get('error', ''))
+
+          (root / 'source_manifest.json').write_text(json.dumps(results, indent=2, ensure_ascii=False))
+          good = [x for x in results if x['state'] == 'downloaded_and_frames_extracted']
+          (root / 'READ_ME_FIRST.txt').write_text(
+              'REBUILD V1.6 CHEST PRESS SIDE-ANGLE REVIEW\n\n'
+              'Review the JPG files named *_angle_contact_sheet.jpg.\n'
+              'They show frames from roughly 15%, 50% and 85% of each candidate clip.\n'
+              'All contact sheets must be visually inspected before claiming a side view.\n'
+              'Preview MP4s are in previews/. Source metadata is in source_manifest.json.\n'
+              'Downloaded candidates: ' + str(len(good)) + '/' + str(len(results)) + '\n'
+              'Do not use a candidate in the production app until verified.\n',
+              encoding='utf-8'
+          )
+          print('PREVIEW_RESULT:', len(good), 'candidate videos generated')
+          PY
+          python3 /tmp/review.py
+
+      - name: Upload candidate frames and short review clips
+        uses: actions/upload-artifact@v4
+        with:
+          name: REBUILD-v1.6-chest-side-angle-review
+          path: angle-review/
+          retention-days: 30
+          if-no-files-found: error
