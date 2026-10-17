@@ -1,0 +1,997 @@
+name: Build REBUILD V1.6 CHEST SIDE VIEW APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/build-v1-6-chest-side-view.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Rebuild Android project structure
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p app/src/main/java/com/rebuild/hamed
+          mkdir -p app/src/main/res/drawable-nodpi
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/raw
+
+          cp MainActivity.kt app/src/main/java/com/rebuild/hamed/MainActivity.kt
+          cp AndroidManifest.xml app/src/main/AndroidManifest.xml
+          cp strings.xml app/src/main/res/values/strings.xml
+          cp styles.xml app/src/main/res/values/styles.xml
+
+          cp chest_press_start.png app/src/main/res/drawable-nodpi/chest_press_start.png
+          cp chest_press_press.png app/src/main/res/drawable-nodpi/chest_press_press.png
+          cp muscles_chest.png app/src/main/res/drawable-nodpi/muscles_chest.png
+          cp mistake_head.png app/src/main/res/drawable-nodpi/mistake_head.png
+          cp mistake_shrug.png app/src/main/res/drawable-nodpi/mistake_shrug.png
+          cp mistake_elbow.png app/src/main/res/drawable-nodpi/mistake_elbow.png
+
+          echo "Downloading real chest press video..."
+
+          PRIMARY_VIDEO="https://assets.mixkit.co/active_storage/video_items/100538/1725384701/100538-video-720.mp4"
+          FALLBACK_VIDEO="https://assets.mixkit.co/videos/preview/mixkit-man-using-chest-press-machine-at-gym-100534-large.mp4"
+
+          if ! curl -fL --retry 3 --retry-delay 2 \
+              -A "Mozilla/5.0" \
+              "$PRIMARY_VIDEO" \
+              -o app/src/main/res/raw/chest_press_real.mp4; then
+
+            echo "Primary video failed. Trying fallback..."
+
+            curl -fL --retry 3 --retry-delay 2 \
+              -A "Mozilla/5.0" \
+              "$FALLBACK_VIDEO" \
+              -o app/src/main/res/raw/chest_press_real.mp4
+          fi
+
+          VIDEO_SIZE=$(stat -c%s app/src/main/res/raw/chest_press_real.mp4)
+          echo "Downloaded video size: $VIDEO_SIZE bytes"
+
+          if [ "$VIDEO_SIZE" -lt 500000 ]; then
+            echo "Downloaded file is too small to be a valid exercise video."
+            exit 1
+          fi
+
+          file app/src/main/res/raw/chest_press_real.mp4 || true
+
+          echo "Downloading verified exercise videos..."
+
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          fi
+
+          fetch_video() {
+            NAME="$1"
+            URL="$2"
+            OUT="app/src/main/res/raw/${NAME}.mp4"
+            TMP="app/src/main/res/raw/${NAME}_source.mp4"
+
+            echo "Downloading ${NAME}..."
+            curl -fL --retry 4 --retry-delay 2 \
+              -A "Mozilla/5.0" \
+              "$URL" \
+              -o "$TMP"
+
+            ffmpeg -y \
+              -i "$TMP" \
+              -t 12 \
+              -r 30 \
+              -vf "scale='if(gt(iw,ih),min(1280,iw),-2)':'if(gt(iw,ih),-2,min(1280,ih))'" \
+              -c:v libx264 \
+              -preset veryfast \
+              -crf 24 \
+              -pix_fmt yuv420p \
+              -an \
+              -movflags +faststart \
+              "$OUT"
+
+            rm -f "$TMP"
+
+            SIZE=$(stat -c%s "$OUT")
+            echo "${NAME} optimized size: ${SIZE} bytes"
+
+            if [ "$SIZE" -lt 200000 ]; then
+              echo "${NAME} video is unexpectedly small."
+              exit 1
+            fi
+          }
+
+          fetch_video \
+            "seated_row_real" \
+            "https://www.pexels.com/download/video/35585654/"
+
+          fetch_video \
+            "leg_press_real" \
+            "https://www.pexels.com/download/video/35585547/"
+
+          fetch_video \
+            "lat_pulldown_real" \
+            "https://www.pexels.com/download/video/35585699/"
+
+          fetch_video \
+            "glute_bridge_real" \
+            "https://www.pexels.com/download/video/6525487/"
+
+          # V1.6: Pexels 34543872, visually reviewed and user-approved.
+          # This is an oblique/three-quarter angle and uses a different machine.
+          # It is not a 90-degree profile view or a mistake-demonstration.
+          echo "Downloading Chest Press angled view (Pexels 34543872)..."
+          SIDE_SOURCE="app/src/main/res/raw/chest_press_side_source.mp4"
+          SIDE_FINAL="app/src/main/res/raw/chest_press_side_view.mp4"
+
+          curl -fL --retry 4 --retry-delay 2 --connect-timeout 25 \
+            -A "Mozilla/5.0" \
+            "https://www.pexels.com/download/video/34543872/" \
+            -o "$SIDE_SOURCE"
+
+          # Verify that the downloaded file is a playable video before packaging.
+          ffprobe -v error -select_streams v:0 \
+            -show_entries stream=codec_name,width,height \
+            -of default=noprint_wrappers=1 "$SIDE_SOURCE"
+
+          ffmpeg -y -hide_banner -loglevel error \
+            -i "$SIDE_SOURCE" \
+            -t 10 \
+            -vf "scale=1280:-2" \
+            -r 24 \
+            -c:v libx264 -preset veryfast -crf 23 \
+            -pix_fmt yuv420p -an -movflags +faststart \
+            "$SIDE_FINAL"
+
+          rm -f "$SIDE_SOURCE"
+
+          SIDE_SIZE=$(stat -c%s "$SIDE_FINAL")
+          echo "Chest Press side-angle video: $SIDE_SIZE bytes"
+          if [ "$SIDE_SIZE" -lt 200000 ]; then
+            echo "ERROR: Side-angle video is too small."
+            exit 1
+          fi
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("app/src/main/java/com/rebuild/hamed/MainActivity.kt")
+          s = p.read_text(encoding="utf-8")
+
+          def enable_video_for(var_name):
+              pattern = rf"(private val {var_name} = Exercise\(\n.*?)(\n\))"
+              match = re.search(pattern, s, re.S)
+              if not match:
+                  raise SystemExit(f"Exercise block not found: {var_name}")
+
+              block = match.group(1)
+              if "animated = true" in block:
+                  return
+
+              new_block = block.rstrip() + ",\n    true"
+              return match, new_block
+
+          for var_name in ["seatedRow", "legPress", "latPulldown", "gluteBridge"]:
+              result = enable_video_for(var_name)
+              if result:
+                  match, new_block = result
+                  s = s[:match.start(1)] + new_block + s[match.end(1):]
+
+
+          s = s.replace("import androidx.compose.animation.Crossfade\n", "")
+          s = s.replace("import androidx.compose.animation.core.tween\n", "")
+
+          if "import android.net.Uri\n" not in s:
+              s = s.replace(
+                  "import android.os.Bundle\n",
+                  "import android.os.Bundle\nimport android.net.Uri\n",
+                  1,
+              )
+
+          media_imports = [
+              "import androidx.compose.ui.viewinterop.AndroidView",
+              "import androidx.media3.common.MediaItem",
+              "import androidx.media3.common.Player",
+              "import androidx.media3.exoplayer.ExoPlayer",
+              "import androidx.media3.ui.AspectRatioFrameLayout",
+              "import androidx.media3.ui.PlayerView",
+          ]
+
+          for imp in media_imports:
+              line = imp + "\n"
+              if line not in s:
+                  s = s.replace(
+                      "import kotlinx.coroutines.delay\n",
+                      line + "import kotlinx.coroutines.delay\n",
+                      1,
+                  )
+
+          s = re.sub(
+              r"\n\s*var frame by rememberSaveable\s*\{\s*mutableIntStateOf\(0\)\s*\}\s*",
+              "\n",
+              s,
+              count=1,
+          )
+
+          start = s.find("    LaunchedEffect(\n        isPlaying,")
+          if start < 0:
+              start = s.find("    LaunchedEffect(isPlaying,")
+
+          if start >= 0:
+              nxt = s.find("    LaunchedEffect(", start + 10)
+              if nxt > start:
+                  s = s[:start] + s[nxt:]
+
+          cross = s.find("Crossfade(")
+          if cross < 0:
+              raise SystemExit("Crossfade block was not found in MainActivity.kt")
+
+          if_start = s.rfind("if (correctMode)", 0, cross)
+          if if_start < 0:
+              raise SystemExit("correctMode block was not found")
+
+          m = re.search(r"\n\s*\}\s*else\s*\{\s*\n", s[cross:], re.S)
+          if not m:
+              raise SystemExit("correctMode else block was not found")
+
+          block_end = cross + m.end()
+          indent = s[s.rfind("\n", 0, if_start) + 1:if_start]
+
+          replacement = (
+              "if (correctMode) {\n"
+              f"{indent}    LocalExerciseVideo(\n"
+              f"{indent}        exerciseId = exercise.id,\n"
+              f"{indent}        isPlaying = isPlaying,\n"
+              f"{indent}        speed = speed,\n"
+              f"{indent}        modifier = Modifier.fillMaxSize()\n"
+              f"{indent}    )\n"
+              f"{indent}}} else {{\n"
+          )
+
+          s = s[:if_start] + replacement + s[block_end:]
+
+          s = s.replace("اشتباه خطرناک", "اشتباه رایج")
+
+          s = s.replace(
+              'Text("7 حرکت · حدود 55–65 دقیقه"',
+              'Text("7 حرکت · حدود \\u200E55–65\\u200E دقیقه"',
+          )
+
+          s = s.replace(
+              '"${session.exercises.size} حرکت · 55–65 دقیقه"',
+              '"${session.exercises.size} حرکت · \\u200E55–65\\u200E دقیقه"',
+          )
+
+          s = s.replace(
+              "Chip(\n                                ex.reps\n                            )",
+              "Chip(\n                                \"\\u200E${ex.reps}\\u200E\"\n                            )",
+          )
+
+          s = s.replace(
+              "Metric(\n                        exercise.reps,",
+              "Metric(\n                        \"\\u200E${exercise.reps}\\u200E\",",
+          )
+
+          s = s.replace(
+              'MiniInfo(\n                    "55–65",',
+              'MiniInfo(\n                    "\\u200E55–65\\u200E",',
+          )
+
+          video_fun = r'''
+          @Composable
+          private fun LocalExerciseVideo(
+              exerciseId: String,
+              isPlaying: Boolean,
+              speed: Float,
+              modifier: Modifier = Modifier
+          ) {
+              val context = LocalContext.current
+
+              val videoRes = when (exerciseId) {
+                  "seated_row" -> R.raw.seated_row_real
+                  "leg_press" -> R.raw.leg_press_real
+                  "lat_pulldown" -> R.raw.lat_pulldown_real
+                  "glute_bridge" -> R.raw.glute_bridge_real
+                  else -> R.raw.chest_press_real
+              }
+
+              val player = remember(exerciseId) {
+                  ExoPlayer.Builder(context).build().apply {
+                      setMediaItem(
+                          MediaItem.fromUri(
+                              Uri.parse(
+                                  "android.resource://${context.packageName}/$videoRes"
+                              )
+                          )
+                      )
+                      repeatMode = Player.REPEAT_MODE_ONE
+                      volume = 0f
+                      prepare()
+                  }
+              }
+
+              LaunchedEffect(isPlaying, speed, exerciseId) {
+                  player.setPlaybackSpeed(speed)
+                  player.playWhenReady = isPlaying
+              }
+
+              DisposableEffect(player) {
+                  onDispose {
+                      player.release()
+                  }
+              }
+
+              AndroidView(
+                  factory = { ctx ->
+                      PlayerView(ctx).apply {
+                          useController = false
+                          resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                          setShutterBackgroundColor(
+                              android.graphics.Color.rgb(242, 246, 250)
+                          )
+                          this.player = player
+                      }
+                  },
+                  update = { view ->
+                      view.player = player
+                  },
+                  modifier = modifier
+              )
+          }
+
+          '''
+
+          if "private fun LocalExerciseVideo(" not in s:
+              marker = "@Composable\nprivate fun PremiumCard"
+
+              if marker not in s:
+                  raise SystemExit("PremiumCard marker was not found")
+
+              s = s.replace(
+                  marker,
+                  video_fun + marker,
+                  1,
+              )
+
+          p.write_text(s, encoding="utf-8")
+          PY
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          rootProject.name = "REBUILD"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "9.0.0" apply false
+              id("org.jetbrains.kotlin.android") version "2.2.20" apply false
+              id("org.jetbrains.kotlin.plugin.compose") version "2.2.20" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          android.builtInKotlin=false
+          android.newDsl=false
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("org.jetbrains.kotlin.plugin.compose")
+          }
+
+          android {
+              namespace = "com.rebuild.hamed"
+              compileSdk = 36
+
+              defaultConfig {
+                  applicationId = "com.rebuild.hamed"
+                  minSdk = 26
+                  targetSdk = 36
+                  versionCode = 7
+                  versionName = "1.6.0"
+              }
+
+              buildFeatures {
+                  compose = true
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              val composeBom =
+                  platform("androidx.compose:compose-bom:2025.09.01")
+
+              implementation(composeBom)
+
+              implementation("androidx.core:core-ktx:1.17.0")
+              implementation("androidx.activity:activity-compose:1.11.0")
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.ui:ui-tooling-preview")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.material:material-icons-extended")
+              implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.3")
+
+              implementation("androidx.media3:media3-exoplayer:1.8.0")
+              implementation("androidx.media3:media3-ui:1.8.0")
+
+              debugImplementation("androidx.compose.ui:ui-tooling")
+          }
+          EOF
+
+      - name: Integrate V1.5 premium exercise UX
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+          p = Path("app/src/main/java/com/rebuild/hamed/MainActivity.kt")
+          s = p.read_text(encoding="utf-8")
+
+          # One exercise screen with context-aware media and tips, preserving the data model.
+          start_marker = "@Composable\nfun ExerciseDetailScreen("
+          end_marker = "\n@Composable\nfun SafetyScreen("
+          start = s.find(start_marker)
+          end = s.find(end_marker, start)
+          if start < 0 or end < 0:
+              raise SystemExit("V1.5 insertion point not found: aborting instead of shipping broken UI")
+
+          new_screen = r'''// REBUILD V1.5 — exercise detail screen + resource-aware teaching media.
+          // Injected by the GitHub Actions workflow after the V1.4 media patch.
+
+          private data class V15ExerciseMedia(
+              val mainVideo: Int,
+              val sideVideo: Int? = null,
+              val mistakeVideo: Int? = null
+          )
+
+          private fun v15MediaFor(id: String): V15ExerciseMedia? = when (id) {
+              "chest_press" -> V15ExerciseMedia(R.raw.chest_press_real, sideVideo = R.raw.chest_press_side_view)
+              "seated_row" -> V15ExerciseMedia(R.raw.seated_row_real)
+              "leg_press" -> V15ExerciseMedia(R.raw.leg_press_real)
+              "lat_pulldown" -> V15ExerciseMedia(R.raw.lat_pulldown_real)
+              "glute_bridge" -> V15ExerciseMedia(R.raw.glute_bridge_real)
+              else -> null
+          }
+
+          private fun v15PatternFor(id: String): String = when (id) {
+              "chest_press" -> "HORIZONTAL PUSH"
+              "seated_row" -> "HORIZONTAL PULL"
+              "leg_press", "box_squat" -> "SQUAT PATTERN"
+              "lat_pulldown" -> "VERTICAL PULL"
+              "glute_bridge" -> "HIP EXTENSION"
+              "ham_curl" -> "KNEE FLEXION"
+              "dead_bug", "bird_dog" -> "CORE STABILITY"
+              "calf_raise" -> "CALF STRENGTH"
+              "hip_abduction" -> "HIP STABILITY"
+              "biceps" -> "ARM STRENGTH"
+              else -> "CONTROLLED STRENGTH"
+          }
+
+          private fun v15MusclesFor(id: String): String = when (id) {
+              "chest_press" -> "سینه · پشت بازو · جلوی شانه"
+              "seated_row" -> "عضلات پشت · پشت شانه · جلو بازو"
+              "leg_press" -> "چهارسر ران · باسن · پشت ران"
+              "lat_pulldown" -> "لت · عضلات پشت · جلو بازو"
+              "glute_bridge" -> "باسن · پشت ران · عضلات مرکزی"
+              "ham_curl" -> "پشت ران"
+              "box_squat" -> "چهارسر ران · باسن"
+              else -> "تقویت هدفمند و کنترل حرکت"
+          }
+
+          private fun v15MistakesFor(id: String): List<Pair<String, String>> = when (id) {
+              "chest_press" -> listOf(
+                  "سر به جلو" to "سر را به تکیه‌گاه نزدیک نگه دار؛ چانه را برای هل دادن جلو نبر.",
+                  "بالا انداختن شانه" to "اگر شانه‌ها به گوش نزدیک می‌شوند، وزنه را سبک‌تر کن.",
+                  "قفل کردن آرنج" to "پرس را کنترل‌شده تمام کن و آرنج‌ها را با ضربه صاف نکن."
+              )
+              "seated_row" -> listOf(
+                  "تاب دادن تنه" to "وزنه را با عقب‌پرت کردن کمر نکش؛ تنه نسبتاً ثابت بماند.",
+                  "جلو آوردن گردن" to "هنگام کشیدن دسته، سر و گردن را هم‌راستای ستون فقرات نگه دار.",
+                  "بالا رفتن شانه" to "شانه‌ها را هنگام کشش بالا نینداز."
+              )
+              "leg_press" -> listOf(
+                  "جدا شدن لگن" to "اگر لگن از پشتی بلند می‌شود، دامنه را کمتر کن.",
+                  "زانوها به داخل" to "زانوها را تقریباً هم‌جهت پنجه‌ها هدایت کن.",
+                  "قفل زانو" to "در انتهای فشار، زانو را با ضربه قفل نکن."
+              )
+              "lat_pulldown" -> listOf(
+                  "کشیدن پشت گردن" to "میله را جلوی بدن پایین بیاور، نه پشت گردن.",
+                  "تاب دادن بدن" to "برای پایین آوردن میله، کمر را عقب پرت نکن.",
+                  "گردن رو به جلو" to "چانه را برای نزدیک شدن به میله جلو نبر."
+              )
+              "glute_bridge" -> listOf(
+                  "قوس زیاد کمر" to "به‌جای خم کردن کمر، باسن را با کنترل بالا ببر.",
+                  "فشار روی گردن" to "وزن را به سر و گردن منتقل نکن.",
+                  "باز شدن بیش‌ازحد دنده‌ها" to "دنده‌ها و شکم را کنترل کن؛ حرکت باید از مفصل ران باشد."
+              )
+              else -> listOf(
+                  "حرکت سریع" to "دامنه و سرعت را کنترل کن.",
+                  "وزنه بیش‌ازحد" to "در صورت به‌هم‌خوردن فرم، وزنه را کاهش بده."
+              )
+          }
+
+          @Composable
+          fun ExerciseDetailScreen(
+              exercise: Exercise,
+              store: RebuildStore,
+              onBack: () -> Unit
+          ) {
+              var seconds by rememberSaveable(exercise.id) { mutableIntStateOf(exercise.rest) }
+              var timerRunning by rememberSaveable(exercise.id) { mutableStateOf(false) }
+              var weight by rememberSaveable(exercise.id) { mutableStateOf(store.weight(exercise.id)) }
+              var reps by rememberSaveable(exercise.id) {
+                  mutableStateOf(store.reps(exercise.id).ifBlank { exercise.reps.substringBefore('–') })
+              }
+              var rir by rememberSaveable(exercise.id) { mutableStateOf(store.rir(exercise.id)) }
+              var saved by remember(exercise.id) { mutableStateOf(false) }
+
+              LaunchedEffect(timerRunning, seconds) {
+                  if (timerRunning && seconds > 0) {
+                      delay(1000)
+                      seconds--
+                  } else if (seconds <= 0) {
+                      timerRunning = false
+                  }
+              }
+
+              val navy = Color(0xFF142338)
+              val blue = Color(0xFF2268D5)
+
+              LazyColumn(
+                  modifier = Modifier.fillMaxSize(),
+                  contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 12.dp, bottom = 36.dp),
+                  verticalArrangement = Arrangement.spacedBy(15.dp)
+              ) {
+                  item {
+                      Column {
+                          BackHeader(exercise.en, exercise.fa, onBack)
+                          Spacer(Modifier.height(8.dp))
+                          Surface(
+                              color = Color(0xFFE8F0FF),
+                              shape = RoundedCornerShape(11.dp)
+                          ) {
+                              Text(
+                                  v15PatternFor(exercise.id),
+                                  modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                  fontSize = 10.sp,
+                                  fontWeight = FontWeight.Black,
+                                  color = blue
+                              )
+                          }
+                          Spacer(Modifier.height(9.dp))
+                          Text(v15MusclesFor(exercise.id), color = Muted, fontSize = 12.sp)
+                      }
+                  }
+
+                  item {
+                      val media = v15MediaFor(exercise.id)
+                      if (media != null) {
+                          V15ExerciseMediaCard(exercise, media)
+                      } else {
+                          Surface(
+                              shape = RoundedCornerShape(22.dp),
+                              color = Color(0xFFEAF1FA),
+                              modifier = Modifier.fillMaxWidth()
+                          ) {
+                              Column(Modifier.padding(22.dp)) {
+                                  Icon(Icons.Default.SmartDisplay, contentDescription = null, tint = blue)
+                                  Spacer(Modifier.height(9.dp))
+                                  Text("ویدیوی این حرکت در دست تهیه است", color = navy, fontWeight = FontWeight.Bold)
+                                  Spacer(Modifier.height(5.dp))
+                                  Text("تا آماده‌شدن کلیپ تأییدشده، نکات اجرا و ایمنی را پایین ببین.", color = Muted, fontSize = 12.sp)
+                              }
+                          }
+                      }
+                  }
+
+                  item {
+                      Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                          Metric("${exercise.sets}", "ست", Modifier.weight(1f))
+                          Metric("\u200E${exercise.reps}\u200E", "تکرار", Modifier.weight(1f))
+                          Metric("${exercise.rest}s", "استراحت", Modifier.weight(1f))
+                      }
+                  }
+
+                  item {
+                      PremiumCard {
+                          Row(verticalAlignment = Alignment.CenterVertically) {
+                              Icon(Icons.Default.TipsAndUpdates, contentDescription = null, tint = blue)
+                              Spacer(Modifier.width(9.dp))
+                              Text("راهنمای اجرای صحیح", fontWeight = FontWeight.Black, color = navy, fontSize = 16.sp)
+                          }
+                          Spacer(Modifier.height(10.dp))
+                          Text(exercise.cue, fontSize = 13.sp, color = navy, lineHeight = 22.sp)
+                      }
+                  }
+
+                  item {
+                      Surface(
+                          shape = RoundedCornerShape(20.dp),
+                          color = Color(0xFFEAF8F2),
+                          border = BorderStroke(1.dp, Color(0xFFD2EFE2)),
+                          modifier = Modifier.fillMaxWidth()
+                      ) {
+                          Row(Modifier.padding(16.dp), verticalAlignment = Alignment.Top) {
+                              Icon(Icons.Default.Shield, contentDescription = null, tint = Color(0xFF16846A))
+                              Spacer(Modifier.width(10.dp))
+                              Column {
+                                  Text("نکته ایمنی", color = Color(0xFF16846A), fontWeight = FontWeight.Black)
+                                  Spacer(Modifier.height(5.dp))
+                                  Text(exercise.safety, color = navy, fontSize = 12.sp, lineHeight = 20.sp)
+                              }
+                          }
+                      }
+                  }
+
+                  item {
+                      PremiumCard {
+                          Row(verticalAlignment = Alignment.CenterVertically) {
+                              Text("ثبت تمرین", color = navy, fontSize = 17.sp, fontWeight = FontWeight.Black)
+                              Spacer(Modifier.weight(1f))
+                              Text("RIR 2–3", color = Muted, fontSize = 11.sp)
+                          }
+                          Spacer(Modifier.height(12.dp))
+                          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                              NumericField(weight, { weight = it; saved = false }, "وزنه kg", Modifier.weight(1f))
+                              NumericField(reps, { reps = it; saved = false }, "تکرار", Modifier.weight(1f))
+                              NumericField(rir, { rir = it; saved = false }, "RIR", Modifier.weight(1f))
+                          }
+                          Spacer(Modifier.height(11.dp))
+                          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                              OutlinedButton(
+                                  onClick = {
+                                      if (seconds == 0) seconds = exercise.rest
+                                      timerRunning = !timerRunning
+                                  },
+                                  modifier = Modifier.weight(1f).height(52.dp),
+                                  shape = RoundedCornerShape(15.dp)
+                              ) {
+                                  Icon(Icons.Default.Timer, contentDescription = null)
+                                  Spacer(Modifier.width(5.dp))
+                                  Text(
+                                      if (timerRunning) "${seconds}s" else if (seconds == 0) "شروع دوباره" else "استراحت ${seconds}s",
+                                      fontSize = 11.sp
+                                  )
+                              }
+                              Button(
+                                  onClick = {
+                                      store.setLog(exercise.id, weight, reps, rir)
+                                      saved = true
+                                  },
+                                  modifier = Modifier.weight(1f).height(52.dp),
+                                  shape = RoundedCornerShape(15.dp)
+                              ) {
+                                  Icon(Icons.Default.Check, contentDescription = null)
+                                  Spacer(Modifier.width(5.dp))
+                                  Text(if (saved) "ثبت شد" else "ثبت ست", fontWeight = FontWeight.Black)
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          private fun V15ExerciseMediaCard(
+              exercise: Exercise,
+              media: V15ExerciseMedia
+          ) {
+              val context = LocalContext.current
+              var showMistakes by rememberSaveable(exercise.id) { mutableStateOf(false) }
+              var sideAngle by rememberSaveable(exercise.id) { mutableStateOf(false) }
+              var isPlaying by rememberSaveable(exercise.id) { mutableStateOf(true) }
+              var speed by rememberSaveable(exercise.id) { mutableFloatStateOf(1f) }
+              var fullscreen by remember { mutableStateOf(false) }
+              var currentPosition by remember { mutableLongStateOf(0L) }
+              val navy = Color(0xFF142338)
+              val blue = Color(0xFF2268D5)
+
+              val selectedRes = when {
+                  showMistakes -> media.mistakeVideo
+                  sideAngle -> media.sideVideo ?: media.mainVideo
+                  else -> media.mainVideo
+              }
+
+              val player = remember(exercise.id) {
+                  ExoPlayer.Builder(context).build().apply {
+                      repeatMode = Player.REPEAT_MODE_ONE
+                      volume = 0f
+                  }
+              }
+              DisposableEffect(player) {
+                  onDispose { player.release() }
+              }
+              LaunchedEffect(player, selectedRes) {
+                  if (selectedRes != null) {
+                      player.setMediaItem(MediaItem.fromUri(Uri.parse("android.resource://${context.packageName}/$selectedRes")))
+                      player.prepare()
+                  } else {
+                      player.pause()
+                  }
+              }
+              LaunchedEffect(player, isPlaying, speed, selectedRes) {
+                  player.setPlaybackSpeed(speed)
+                  player.playWhenReady = isPlaying && selectedRes != null
+              }
+              LaunchedEffect(player, selectedRes) {
+                  while (true) {
+                      currentPosition = player.currentPosition
+                      delay(400)
+                  }
+              }
+              val durationMs = player.duration.takeIf { it > 0 } ?: 0L
+              val progress = if (durationMs > 0L) {
+                  (currentPosition.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
+              } else 0f
+
+              Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                      FilterChip(
+                          selected = !showMistakes,
+                          onClick = { showMistakes = false; isPlaying = true },
+                          label = { Text("فرم صحیح") },
+                          leadingIcon = { Icon(Icons.Default.CheckCircle, contentDescription = null) },
+                          modifier = Modifier.weight(1f)
+                      )
+                      FilterChip(
+                          selected = showMistakes,
+                          onClick = { showMistakes = true; fullscreen = false },
+                          label = { Text("اشتباهات رایج") },
+                          leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },
+                          modifier = Modifier.weight(1f)
+                      )
+                  }
+
+                  if (!showMistakes || media.mistakeVideo != null) {
+                      Surface(
+                          shape = RoundedCornerShape(22.dp),
+                          color = Color(0xFF122037),
+                          modifier = Modifier.fillMaxWidth()
+                      ) {
+                          Column {
+                              Box(Modifier.fillMaxWidth().aspectRatio(16f / 9f)) {
+                                  if (!fullscreen) {
+                                      V15VideoSurface(player, Modifier.fillMaxSize())
+                                  }
+                              }
+                              Slider(
+                                  value = progress,
+                                  onValueChange = { fraction ->
+                                      if (durationMs > 0L) player.seekTo((durationMs * fraction).toLong())
+                                  },
+                                  modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                                  colors = SliderDefaults.colors(
+                                      thumbColor = Color.White,
+                                      activeTrackColor = Color(0xFF86B7FF),
+                                      inactiveTrackColor = Color(0xFF46566D)
+                                  )
+                              )
+                              Row(
+                                  modifier = Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 2.dp, bottom = 5.dp),
+                                  verticalAlignment = Alignment.CenterVertically,
+                                  horizontalArrangement = Arrangement.spacedBy(3.dp)
+                              ) {
+                                  IconButton(onClick = { isPlaying = !isPlaying }) {
+                                      Icon(
+                                          if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                          contentDescription = if (isPlaying) "توقف" else "پخش",
+                                          tint = Color.White
+                                      )
+                                  }
+                                  IconButton(onClick = { player.seekTo(0); isPlaying = true }) {
+                                      Icon(Icons.Default.Replay, contentDescription = "شروع دوباره", tint = Color.White)
+                                  }
+                                  Spacer(Modifier.weight(1f))
+                                  TextButton(onClick = { speed = if (speed == .5f) 1f else .5f }) {
+                                      Text(if (speed == .5f) "0.5×" else "1×", color = Color.White, fontWeight = FontWeight.Bold)
+                                  }
+                                  IconButton(onClick = { fullscreen = true }) {
+                                      Icon(Icons.Default.Fullscreen, contentDescription = "تمام صفحه", tint = Color.White)
+                                  }
+                              }
+                          }
+                      }
+                  } else {
+                      PremiumCard {
+                          Row(verticalAlignment = Alignment.CenterVertically) {
+                              Icon(Icons.Default.FactCheck, contentDescription = null, tint = Color(0xFFB8423C))
+                              Spacer(Modifier.width(8.dp))
+                              Text("چه اشتباه‌هایی را اصلاح کنیم؟", fontWeight = FontWeight.Black, color = navy, fontSize = 15.sp)
+                          }
+                          Spacer(Modifier.height(12.dp))
+                          v15MistakesFor(exercise.id).forEachIndexed { index, pair ->
+                              Surface(
+                                  shape = RoundedCornerShape(14.dp),
+                                  color = Color(0xFFF8F9FC),
+                                  modifier = Modifier.fillMaxWidth()
+                              ) {
+                                  Row(Modifier.padding(12.dp), verticalAlignment = Alignment.Top) {
+                                      Surface(shape = RoundedCornerShape(9.dp), color = Color(0xFFFFE8E5)) {
+                                          Text("${index + 1}", modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp), color = Color(0xFFB8423C), fontWeight = FontWeight.Black)
+                                      }
+                                      Spacer(Modifier.width(10.dp))
+                                      Column {
+                                          Text(pair.first, color = navy, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                          Spacer(Modifier.height(4.dp))
+                                          Text(pair.second, color = Muted, fontSize = 12.sp, lineHeight = 19.sp)
+                                      }
+                                  }
+                              }
+                              Spacer(Modifier.height(8.dp))
+                          }
+                          Text("فیلم اختصاصی این اشتباه‌ها پس از بررسی آموزشی اضافه می‌شود.", color = Muted, fontSize = 11.sp)
+                      }
+                  }
+
+                  if (!showMistakes) {
+                      Row(verticalAlignment = Alignment.CenterVertically) {
+                          Surface(shape = RoundedCornerShape(12.dp), color = Color(0xFFE8F0FF)) {
+                              Text(if (sideAngle) "نمای مایل از کنار" else "نمای اصلی", modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp), color = blue, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                          }
+                          if (media.sideVideo != null) {
+                              Spacer(Modifier.width(8.dp))
+                              OutlinedButton(onClick = { sideAngle = !sideAngle; isPlaying = true }) {
+                                  Text(if (sideAngle) "نمای اصلی" else "نمای زاویه‌دار")
+                              }
+                          } else {
+                              Spacer(Modifier.width(8.dp))
+                              Text("نمای بغل در حال آماده‌سازی", fontSize = 10.sp, color = Muted)
+                          }
+                      }
+                  }
+
+                  if (exercise.id == "chest_press" && sideAngle && !showMistakes) {
+                      Text(
+                          "این کلیپ از زاویه مایل و با دستگاه متفاوت ضبط شده است. آن را برای بررسی موقعیت گردن و شانه ببین؛ تنظیمات و مسیر دقیق دستگاه‌ها یکسان نیست.",
+                          color = Muted,
+                          fontSize = 11.sp,
+                          lineHeight = 18.sp,
+                          modifier = Modifier.padding(horizontal = 5.dp)
+                      )
+                  }
+              }
+
+              if (fullscreen && selectedRes != null) {
+                  Dialog(
+                      onDismissRequest = { fullscreen = false },
+                      properties = DialogProperties(usePlatformDefaultWidth = false)
+                  ) {
+                      Column(
+                          Modifier.fillMaxSize().background(Color(0xFF0D1728)),
+                          verticalArrangement = Arrangement.Center
+                      ) {
+                          Row(Modifier.fillMaxWidth().padding(horizontal = 15.dp), horizontalArrangement = Arrangement.End) {
+                              IconButton(onClick = { fullscreen = false }) {
+                                  Icon(Icons.Default.Close, contentDescription = "بستن تمام صفحه", tint = Color.White)
+                              }
+                          }
+                          V15VideoSurface(player, Modifier.fillMaxWidth().aspectRatio(16f / 9f))
+                          Row(
+                              Modifier.fillMaxWidth().padding(12.dp),
+                              verticalAlignment = Alignment.CenterVertically,
+                              horizontalArrangement = Arrangement.Center
+                          ) {
+                              IconButton(onClick = { isPlaying = !isPlaying }) {
+                                  Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, contentDescription = null, tint = Color.White)
+                              }
+                              IconButton(onClick = { player.seekTo(0); isPlaying = true }) {
+                                  Icon(Icons.Default.Replay, contentDescription = "شروع دوباره", tint = Color.White)
+                              }
+                              TextButton(onClick = { speed = if (speed == .5f) 1f else .5f }) {
+                                  Text(if (speed == .5f) "0.5×" else "1×", color = Color.White)
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          private fun V15VideoSurface(player: ExoPlayer, modifier: Modifier = Modifier) {
+              AndroidView(
+                  factory = { ctx ->
+                      PlayerView(ctx).apply {
+                          useController = false
+                          resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                          setShutterBackgroundColor(android.graphics.Color.rgb(18, 32, 55))
+                          this.player = player
+                      }
+                  },
+                  update = { it.player = player },
+                  modifier = modifier
+              )
+          }
+          '''
+          s = s[:start] + new_screen.rstrip() + "\n" + s[end:]
+
+          for imp in [
+              "import androidx.compose.ui.window.Dialog",
+              "import androidx.compose.ui.window.DialogProperties",
+          ]:
+              if imp + "\n" not in s:
+                  anchor = "import androidx.compose.ui.viewinterop.AndroidView\n"
+                  if anchor not in s:
+                      raise SystemExit("AndroidView import missing; ensure V1.4 media patch completed")
+                  s = s.replace(anchor, anchor + imp + "\n", 1)
+
+          assert "private fun V15ExerciseMediaCard" in s
+          assert "fun ExerciseDetailScreen(" in s
+          assert "v15MistakesFor" in s
+          assert "fun SafetyScreen()" in s
+          p.write_text(s, encoding="utf-8")
+          print("V1.5 UI integrated. Kotlin file size:", p.stat().st_size)
+          PY
+          echo "V1.5 UI ready; checking preserved screen and controls."
+          grep -q "private fun V15ExerciseMediaCard" app/src/main/java/com/rebuild/hamed/MainActivity.kt
+          grep -q "store.setLog(exercise.id, weight, reps, rir)" app/src/main/java/com/rebuild/hamed/MainActivity.kt
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Configure Android SDK
+        shell: bash
+        run: |
+          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+
+          yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager \
+            --licenses >/dev/null || true
+
+          /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "platform-tools"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.1.0'
+
+      - name: Build V1.6 APK
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Upload V1.6 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: REBUILD-v1.6-chest-side-view-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
